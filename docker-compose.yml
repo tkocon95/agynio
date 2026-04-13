@@ -1,93 +1,139 @@
 services:
   postgres:
     image: postgres:16-alpine
-    oom_score_adj: -900
     container_name: postgres
     restart: unless-stopped
+    user: root
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     ports:
-      - "5442:5432"
+      - "0.0.0.0:5442:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     command:
-      [
-        "postgres",
-        "-c",
-        "shared_buffers=512MB",
-        "-c",
-        "work_mem=4MB",
-        "-c",
-        "maintenance_work_mem=64MB",
-        "-c",
-        "max_connections=50",
-        "-c",
-        "wal_buffers=4MB",
-        "-c",
-        "effective_cache_size=2GB",
-      ]
+      - "postgres"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "wal_buffers=4MB"
+      - "-c"
+      - "effective_cache_size=2GB"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - agents_net
 
-  # Dedicated Postgres for agents persistence
   agents-db:
     image: postgres:16-alpine
-    oom_score_adj: -900
     container_name: agents-db
     restart: unless-stopped
+    user: root
     environment:
       POSTGRES_USER: ${AGENTS_DB_USER:-agents}
       POSTGRES_PASSWORD: ${AGENTS_DB_PASSWORD:-agents}
       POSTGRES_DB: ${AGENTS_DB_NAME:-agents}
     ports:
-      - "5443:5432"
+      - "0.0.0.0:5443:5432"
     volumes:
       - agents_pgdata:/var/lib/postgresql/data
     command:
-      [
-        "postgres",
-        "-c",
-        "shared_buffers=512MB",
-        "-c",
-        "work_mem=4MB",
-        "-c",
-        "maintenance_work_mem=64MB",
-        "-c",
-        "max_connections=50",
-        "-c",
-        "wal_buffers=4MB",
-        "-c",
-        "effective_cache_size=2GB",
-      ]
+      - "postgres"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "max_connections=50"
+      - "-c"
+      - "wal_buffers=4MB"
+      - "-c"
+      - "effective_cache_size=2GB"
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${AGENTS_DB_USER:-agents} -d ${AGENTS_DB_NAME:-agents}",
-        ]
+      test: ["CMD-SHELL", "pg_isready -U ${AGENTS_DB_USER:-agents} -d ${AGENTS_DB_NAME:-agents}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - agents_net
+
+  litellm-db:
+    image: postgres:16-alpine
+    container_name: litellm-db
+    restart: unless-stopped
+    user: root
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - litellm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - agents_net
+
+  litellm:
+    image: ghcr.io/berriai/litellm:v1.83.5-nightly
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    command:
+      - "--config=/app/config.yaml"
+    container_name: litellm
+    restart: unless-stopped
+    user: root
+    environment:
+      LITELLM_MASTER_KEY: sk-dev-master-1234
+      LITELLM_SALT_KEY: sk-dev-salt-1234
+      DATABASE_URL: postgresql://litellm:change-me@litellm-db:5432/litellm
+      STORE_MODEL_IN_DB: "True"
+      UI_USERNAME: admin
+      UI_PASSWORD: admin
+      PORT: "4000"
+      HOST: "0.0.0.0"
+    depends_on:
+      litellm-db:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || true"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - agents_net
 
   vault:
     image: hashicorp/vault:1.17
-    oom_score_adj: -900
     container_name: vault
     restart: unless-stopped
+    user: root
     cap_add:
       - IPC_LOCK
     ports:
-      - "8200:8200"
+      - "0.0.0.0:8200:8200"
     environment:
       VAULT_ADDR: http://127.0.0.1:8200
       VAULT_LOCAL_CONFIG: |
         ui = true
-        cluster_name = "local-vault"
         disable_mlock = true
         listener "tcp" {
           address     = "0.0.0.0:8200"
@@ -101,10 +147,13 @@ services:
     command: ["server"]
     volumes:
       - vault-file:/vault/file
+    networks:
+      - agents_net
 
   vault-auto-init:
     image: hashicorp/vault:1.17
     container_name: vault-auto-init
+    user: root
     depends_on:
       - vault
     restart: "no"
@@ -114,25 +163,109 @@ services:
       - vault-file:/vault/file
       - ./vault/auto-init.sh:/auto-init.sh:ro
     entrypoint: ["/bin/sh", "/auto-init.sh"]
-  # Lightweight Docker registry mirror (proxy cache)
-  # - Uses official registry:2 with proxy enabled via env var
-  # - Exposed only on the user-defined bridge network 'agents_net' (no host ports)
-  # - DinD sidecars in workspaces will use http://registry-mirror:5000 as --registry-mirror
-  registry-mirror:
-    image: registry:2
-    restart: unless-stopped
-    environment:
-      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
-      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
     networks:
       - agents_net
 
-  # Nix Content-Addressable Proxy Server (ncps)
+  migrate:
+    image: node:20-alpine
+    container_name: migrate
+    restart: "no"
+    user: root
+    environment:
+      AGENTS_DATABASE_URL: postgresql://agents:agents@agents-db:5432/agents
+    volumes:
+      - ./packages/platform-server/prisma:/prisma
+    command: >
+      sh -c "npm install -g prisma@6.18.0 --quiet 2>/dev/null &&
+             prisma migrate deploy --schema /prisma/schema.prisma"
+    depends_on:
+      agents-db:
+        condition: service_healthy
+    networks:
+      - agents_net
+
+  platform-server:
+    image: ghcr.io/agynio/platform-server:latest
+    container_name: platform-server
+    restart: unless-stopped
+    user: root
+    environment:
+      AGENTS_DATABASE_URL: postgresql://agents:agents@agents-db:5432/agents
+      LLM_PROVIDER: litellm
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: sk-dev-master-1234
+      DOCKER_RUNNER_SHARED_SECRET: "super-secret-hmac-key-change-me"
+      DOCKER_RUNNER_OPTIONAL: "true"
+      DOCKER_RUNNER_GRPC_HOST: docker-runner
+      DOCKER_RUNNER_GRPC_PORT: 50051
+      CORS_ORIGINS: "*"
+    ports:
+      - "0.0.0.0:3010:3010"
+    depends_on:
+      agents-db:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3010/ > /dev/null 2>&1; exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - agents_net
+
+  platform-ui:
+    image: ghcr.io/agynio/platform-ui:latest
+    container_name: platform-ui
+    restart: unless-stopped
+    user: root
+    environment:
+      API_UPSTREAM: http://platform-server:3010
+    ports:
+      - "0.0.0.0:8080:80"
+    depends_on:
+      platform-server:
+        condition: service_started
+    networks:
+      - agents_net
+
+  registry-mirror:
+    image: registry:2
+    restart: unless-stopped
+    user: root
+    environment:
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+    ports:
+      - "5000:5000"
+    networks:
+      - agents_net
+
+  docker-runner:
+    image: ghcr.io/agynio/docker-runner:latest
+    container_name: docker-runner
+    user: root
+    restart: unless-stopped
+    environment:
+      DOCKER_RUNNER_SHARED_SECRET: "super-secret-hmac-key-change-me"
+      DOCKER_MIRROR_URL: http://registry-mirror:5000
+    ports:
+      - "50051:50051"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - agents_net
+
+# Nix Content-Addressable Proxy Server (ncps)
   # Provides a nix binary cache proxy for workspace containers.
   # - No host ports exposed; reachable on agents_net as http://ncps:8501
   # - Persistent storage backed by the ncps-storage volume
   ncps-init:
     image: alpine:3.20
+    user: root
     command:
       [
         "/bin/sh",
@@ -161,6 +294,7 @@ services:
 
   ncps:
     image: kalbasit/ncps:latest
+    user: root
     oom_score_adj: -900
     depends_on:
       ncps-migrate:
@@ -190,124 +324,37 @@ services:
       retries: 5
       start_period: 20s
 
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    networks:
-      - agents_net
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  notifications:
-    image: ghcr.io/agynio/notifications:edge
-    container_name: notifications
-    restart: unless-stopped
-    environment:
-      GRPC_ADDR: 0.0.0.0:9090
-      REDIS_ADDR: redis:6379
-      REDIS_DB: "0"
-      REDIS_CHANNEL: notifications.v1
-    ports:
-      - "9090:9090"
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - agents_net
-
-  notifications-gateway:
-    image: ghcr.io/agynio/notifications-gateway:edge
-    container_name: notifications-gateway
-    restart: unless-stopped
-    environment:
-      HTTP_ADDR: 0.0.0.0:3011
-      REDIS_ADDR: redis:6379
-      REDIS_DB: "0"
-      REDIS_CHANNEL: notifications.v1
-    ports:
-      - "3011:3011"
-    depends_on:
-      redis:
-        condition: service_healthy
-    networks:
-      - agents_net
-
-  # LiteLLM Postgres database
-  litellm-db:
-    image: postgres:16-alpine
-    oom_score_adj: -900
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: litellm
-      POSTGRES_USER: litellm
-      POSTGRES_PASSWORD: change-me
-    volumes:
-      - litellm_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      # Allow time for initial database startup & init
-      start_period: 20s
-    networks:
-      - agents_net
-
-  # LiteLLM server and UI
-  litellm:
-    image: ghcr.io/berriai/litellm:v1.80.5-stable
-    oom_score_adj: -900
-    restart: unless-stopped
-    environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-dev-master-1234}
-      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-dev-salt-1234}
-      DATABASE_URL: postgresql://litellm:change-me@litellm-db:5432/litellm
-      STORE_MODEL_IN_DB: "True"
-      UI_USERNAME: ${LITELLM_UI_USERNAME:-admin}
-      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-admin}
-      PORT: "4000"
-      HOST: "0.0.0.0"
-    depends_on:
-      litellm-db:
-        condition: service_healthy
-    ports:
-      # Bind to loopback in dev to avoid exposing externally.
-      # Change to "0.0.0.0:4000:4000" or "4000:4000" to expose on LAN.
-      - "127.0.0.1:4000:4000"
-    healthcheck:
-      # Prefer HTTP health endpoint; fall back to UI or root if /health absent.
-      # If wget/curl are unavailable in the image, fall back to a TCP check via nc.
-      test:
-        [
-          "CMD-SHELL",
-          "wget -qO- http://localhost:4000/health || wget -qO- http://localhost:4000/ui || wget -qO- http://localhost:4000/ || (command -v curl >/dev/null 2>&1 && curl -fsS http://localhost:4000/health) || (command -v nc >/dev/null 2>&1 && nc -z localhost 4000)",
-        ]
-      interval: 15s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    networks:
-      - agents_net
-      
 volumes:
   vault-file:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/vault
   pgdata:
-  ncps-storage:
     driver: local
-  litellm_pgdata:
-    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/postgres
   agents_pgdata:
     driver: local
-
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/agents
+  litellm_pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/litellm
+  ncps-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ncps
 networks:
-  # Shared user-defined bridge with deterministic name so non-compose containers
-  # can attach to it (e.g., workspace containers launched via Docker API).
   agents_net:
     name: agents_net
