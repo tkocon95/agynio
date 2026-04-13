@@ -91,10 +91,6 @@ services:
 
   litellm:
     image: ghcr.io/berriai/litellm:v1.83.5-nightly
-    volumes:
-      - ./litellm_config.yaml:/app/config.yaml
-    command:
-      - "--config=/app/config.yaml"
     container_name: litellm
     restart: unless-stopped
     user: root
@@ -107,6 +103,12 @@ services:
       UI_PASSWORD: admin
       PORT: "4000"
       HOST: "0.0.0.0"
+      LITELLM_CONFIG: |
+        model_list:
+          - model_name: fake-model
+            litellm_params:
+              model: openai/fake-model
+              api_key: fake-key
     depends_on:
       litellm-db:
         condition: service_healthy
@@ -146,7 +148,7 @@ services:
         cluster_addr = "http://vault:8201"
     command: ["server"]
     volumes:
-      - vault-file:/vault/file
+      - vault-data:/vault/file
     networks:
       - agents_net
 
@@ -160,7 +162,7 @@ services:
     environment:
       VAULT_ADDR: http://vault:8200
     volumes:
-      - vault-file:/vault/file
+      - vault-data:/vault/file
       - ./vault/auto-init.sh:/auto-init.sh:ro
     entrypoint: ["/bin/sh", "/auto-init.sh"]
     networks:
@@ -325,36 +327,16 @@ services:
       start_period: 20s
 
 volumes:
-  vault-file:
+  vault-data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./volumes/vault
   pgdata:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./volumes/postgres
   agents_pgdata:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./volumes/agents
   litellm_pgdata:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./volumes/litellm
   ncps-storage:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./volumes/ncps
 networks:
   agents_net:
     name: agents_net
