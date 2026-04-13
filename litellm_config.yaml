@@ -1,0 +1,7 @@
+model_list:
+  - model_name: MiniMax-M2.7-highspeed
+    litellm_params:
+      custom_llm_provider: minimax
+      model: MiniMax-M2.7-highspeed
+      api_key: sk-cp-fake-key
+      api_base: https://api.minimax.io/v1
