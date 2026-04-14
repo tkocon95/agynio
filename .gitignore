@@ -32,3 +32,6 @@ packages/**/src/proto/gen/
 packages/runner-proto/src/gen/
 .bufbuild/
 .devspace
+
+# LiteLLM init script (contains sensitive API keys)
+litellm-init.sh

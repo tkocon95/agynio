@@ -1,0 +1,96 @@
+#!/bin/bash
+set -e
+
+# Configuration
+# Use host.docker.internal to reach litellm from host
+LITELLM_HOST="${LITELLM_HOST:-http://host.docker.internal:4000}"
+MASTER_KEY="${LITELLM_MASTER_KEY:-sk-dev-master-1234}"
+MODEL_NAME="${MODEL_NAME:-MiniMax-M2.7-highspeed}"
+API_KEY="${MINIMAX_API_KEY:-YOUR_MINIMAX_API_KEY_HERE}"
+API_BASE="${MINIMAX_API_BASE:-https://api.minimax.io/v1}"
+
+echo "========================================"
+echo "LiteLLM Model Init Script"
+echo "========================================"
+echo "LiteLLM Host: $LITELLM_HOST"
+echo "Model Name: $MODEL_NAME"
+echo "Custom LLM Provider: minimax"
+echo ""
+
+# Function to call LiteLLM API
+call_litellm() {
+    local method="$1"
+    local endpoint="$2"
+    local data="$3"
+    
+    curl -s -X "$method" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MASTER_KEY" \
+        "${LITELLM_HOST}${endpoint}" \
+        ${data:+-d "$data"}
+}
+
+# Wait for LiteLLM to be ready
+echo "[1/4] Waiting for LiteLLM to be ready..."
+max_retries=30
+retry_count=0
+while [ $retry_count -lt $max_retries ]; do
+    if curl -s -f "${LITELLM_HOST}/health/liveness" > /dev/null 2>&1; then
+        echo "      LiteLLM is ready!"
+        break
+    fi
+    retry_count=$((retry_count + 1))
+    echo "      Waiting... ($retry_count/$max_retries)"
+    sleep 2
+done
+
+if [ $retry_count -eq $max_retries ]; then
+    echo "ERROR: LiteLLM did not become ready in time"
+    exit 1
+fi
+
+# Check existing models via /v1/models
+echo ""
+echo "[2/4] Checking existing models..."
+models_response=$(call_litellm GET "/v1/models")
+if echo "$models_response" | grep -q "\"MiniMax-M2.7-highspeed\""; then
+    echo "      Model '$MODEL_NAME' already exists!"
+else
+    echo "      Model '$MODEL_NAME' not found. Proceeding with creation..."
+    
+    # Add the minimax model via LiteLLM API
+    echo ""
+    echo "[3/4] Adding model '$MODEL_NAME' with custom_llm_provider=minimax..."
+    response=$(call_litellm POST "/model/new" "{
+        \"model_name\": \"${MODEL_NAME}\",
+        \"litellm_params\": {
+            \"model\": \"minimax/${MODEL_NAME}\",
+            \"custom_llm_provider\": \"minimax\",
+            \"api_key\": \"${API_KEY}\",
+            \"api_base\": \"${API_BASE}\"
+        }
+    }")
+    
+    echo "      Response: $response"
+fi
+
+# Verify model was added
+echo ""
+echo "[4/4] Verifying model '$MODEL_NAME'..."
+sleep 2
+verify_response=$(call_litellm GET "/v1/models")
+
+if echo "$verify_response" | grep -q "\"MiniMax-M2.7-highspeed\""; then
+    echo ""
+    echo "========================================"
+    echo "✅ SUCCESS: Model '$MODEL_NAME' with custom_llm_provider=minimax created!"
+    echo "========================================"
+    exit 0
+else
+    echo ""
+    echo "========================================"
+    echo "⚠️  WARNING: Could not verify model creation."
+    echo "   Please check LiteLLM UI at ${LITELLM_HOST}/ui"
+    echo "========================================"
+    exit 1
+fi
